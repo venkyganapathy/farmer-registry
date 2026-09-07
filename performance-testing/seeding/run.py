@@ -22,6 +22,7 @@ from generators import (
     crop, farm_inputs, farmer, history, household, household_member,
     land, livestock, membership_details,
 )
+from id_scheme import init_pod_id_scheme
 from search_anchors import generate_anchors
 from seed_manifest import ManifestBuilder
 
@@ -80,15 +81,27 @@ class TableSink:
             self.history_writer.flush()
 
 
-def run(tier: str, dsn_override: str | None):
+def run(tier: str, dsn_override: str | None, pod_index: int = 0, total_pods: int = 1):
     if dsn_override:
         config.DB_DSN = dsn_override
 
-    target_farmers = config.DATA_VOLUME_TIERS[tier]
-    print(f"[seed] tier={tier} target_farmers={target_farmers}")
+    total_target_farmers = config.DATA_VOLUME_TIERS[tier]
+    
+    # Calculate this pod's share of farmers
+    farmers_per_pod = total_target_farmers // total_pods
+    # Give the last pod any remainder
+    if pod_index == total_pods - 1:
+        target_farmers = total_target_farmers - (pod_index * farmers_per_pod)
+    else:
+        target_farmers = farmers_per_pod
+    
+    print(f"[seed] tier={tier} total_target={total_target_farmers} pod={pod_index}/{total_pods} target_farmers={target_farmers}")
+    
+    # Initialize pod-specific ID scheme to prevent duplicates
+    init_pod_id_scheme(pod_index, total_pods, total_target_farmers)
 
     anchors = generate_anchors()
-    manifest = ManifestBuilder(search_terms=anchors, data_volume=tier)
+    manifest = ManifestBuilder(search_terms=anchors, data_volume=tier, pod_index=pod_index, total_pods=total_pods)
 
     conn = db.connect()
     metadata_cursor = conn.cursor()
@@ -165,7 +178,8 @@ def run(tier: str, dsn_override: str | None):
     conn.commit()
 
     manifest.write(config.SEED_MANIFEST_PATH)
-    print(f"[seed] manifest written to {config.SEED_MANIFEST_PATH}")
+    manifest_path = config.SEED_MANIFEST_PATH if total_pods == 1 else f"{config.SEED_MANIFEST_PATH.rsplit('.', 1)[0]}_pod{pod_index}.json"
+    print(f"[seed] manifest written to {manifest_path}")
 
     for key, sink in sinks.items():
         print(f"[seed] {key}: live={sink.live_count} history={sink.history_count}")
@@ -178,5 +192,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tier", choices=list(config.DATA_VOLUME_TIERS), required=True)
     parser.add_argument("--dsn", default=None, help="overrides SEED_DB_DSN / config.DB_DSN")
+    parser.add_argument("--pod-index", type=int, default=0, help="zero-based index of this pod (0 to total-pods-1)")
+    parser.add_argument("--total-pods", type=int, default=1, help="total number of pods running in parallel")
     args = parser.parse_args()
-    run(args.tier, args.dsn)
+    
+    if args.pod_index >= args.total_pods:
+        print(f"Error: pod-index ({args.pod_index}) must be less than total-pods ({args.total_pods})")
+        sys.exit(1)
+    
+    run(args.tier, args.dsn, args.pod_index, args.total_pods)

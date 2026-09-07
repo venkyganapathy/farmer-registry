@@ -3,6 +3,7 @@ ANALYZE steps described in README.md "Load mechanics"."""
 
 import io
 import json
+import os
 from csv import writer as csv_writer
 from datetime import date, datetime
 
@@ -12,7 +13,29 @@ import config
 from config import BATCH_SIZE
 
 
+def _build_dsn_from_env():
+    """Build DSN from individual environment variables (Kubernetes pattern)."""
+    pg_host = os.environ.get("PGHOST", "localhost")
+    pg_port = os.environ.get("PGPORT", "5432")
+    pg_database = os.environ.get("PGDATABASE", "g2p_registry")
+    pg_user = os.environ.get("PGUSER", "postgres")
+    pg_password = os.environ.get("PGPASSWORD", "postgres")
+    
+    return f"postgresql://{pg_user}:{pg_password}@{pg_host}:{pg_port}/{pg_database}"
+
+
 def connect():
+    # Build DSN from environment variables if they are set (Kubernetes pattern)
+    # Environment variables take precedence over config.DB_DSN
+    # Updated for Kubernetes deployment - v2
+    if any(key in os.environ for key in ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"]):
+        config.DB_DSN = _build_dsn_from_env()
+        print(f"[db] Using environment variables to build DSN")
+    else:
+        print(f"[db] No environment variables found, using config.DB_DSN")
+    
+    print(f"[db] Connecting with DSN: {config.DB_DSN}")
+    
     # references config.DB_DSN (not a bound import) so run.py's --dsn
     # override, applied by mutating config.DB_DSN before connect() is
     # called, takes effect.

@@ -25,6 +25,8 @@ install/run.
 
 ## Running
 
+### Local Single-Pod Execution
+
 ```sh
 cd performance-testing/seeding
 export SEED_DB_DSN=postgresql://user:pass@host:5432/g2p_registry
@@ -32,8 +34,51 @@ python run.py --tier smoke      # 10K farmers, sanity check first
 python run.py --tier primary    # 10M farmers, the headline benchmark figure
 ```
 
-Tiers: `smoke` (10K), `primary` (10M), `stretch` (50M), `stress` (100M) — see
-`config.DATA_VOLUME_TIERS`. For a `smoke`-tier correctness check, also set
+### Kubernetes Parallel Execution
+
+For large data volumes (10M+), use Kubernetes Jobs for parallel execution:
+
+```sh
+cd performance-testing/seeding/k8s
+
+# Build and push Docker image
+./build_and_push.sh
+
+# Generate job manifests (10M farmers with 10 parallel pods)
+python generate_jobs.py --tier primary --pods 10
+
+# Deploy all jobs
+kubectl apply -k k8s/jobs/kustomization-primary.yaml
+
+# Monitor progress
+kubectl get jobs -l app=farmer-registry-seeding -w
+kubectl logs -l app=farmer-registry-seeding --tail=100 -f
+
+# Merge manifests after completion
+python merge_manifests.py --tier primary --pods 10
+```
+
+See [`k8s/README.md`](k8s/README.md) for detailed Kubernetes setup and configuration.
+
+### Local Testing with Pod Parameters
+
+Test pod-specific ID allocation locally:
+
+```sh
+python run.py --tier primary --pod-index 0 --total-pods 10
+python run.py --tier primary --pod-index 1 --total-pods 10
+```
+
+## Tiers
+
+| Tier    | Farmers | Default Pods | Use Case              |
+|---------|---------|--------------|-----------------------|
+| smoke   | 10K     | 1            | Quick sanity check    |
+| primary | 10M     | 10           | Main benchmark        |
+| stretch | 50M     | 15           | Scaling test          |
+| stress  | 100M    | 20           | Maximum load test     |
+
+See `config.DATA_VOLUME_TIERS` for definitions. For a `smoke`-tier correctness check, also set
 `config.DEFER_INDEXES = False` first — see
 [`seeding-design.md`](../documentation/seeding-design.md) "Load mechanics" for
 why.

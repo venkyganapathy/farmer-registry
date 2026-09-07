@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- seeding-primary-pod-0.yaml
+- seeding-primary-pod-1.yaml
+- seeding-primary-pod-2.yaml
+- seeding-primary-pod-3.yaml
+- seeding-primary-pod-4.yaml
+- seeding-primary-pod-5.yaml
+- seeding-primary-pod-6.yaml
+- seeding-primary-pod-7.yaml
+- seeding-primary-pod-8.yaml
+- seeding-primary-pod-9.yaml
