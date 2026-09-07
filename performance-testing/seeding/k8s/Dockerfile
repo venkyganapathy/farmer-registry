@@ -24,6 +24,8 @@ COPY search_anchors.py .
 COPY seed_manifest.py .
 COPY generators/ ./generators/
 
+ENV PYTHONUNBUFFERED=1
+
 # Force rebuild by touching db.py
 RUN touch db.py && stat db.py
 

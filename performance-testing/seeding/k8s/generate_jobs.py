@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import glob
 import os
 import sys
 import yaml
@@ -72,12 +73,14 @@ def generate_job_yaml(tier: str, pod_index: int, total_pods: int, config: dict) 
                         {
                             "name": "seeding",
                             "image": config.get("image", DEFAULT_IMAGE),
+                            "imagePullPolicy": "Always",
                             "command": [
                                 "python",
                                 "run.py",
                                 "--tier", tier,
                                 "--pod-index", str(pod_index),
                                 "--total-pods", str(total_pods),
+                                "--workers", str(config.get("workers", 1)),
                             ],
                             "env": [
                                 {
@@ -105,6 +108,22 @@ def generate_job_yaml(tier: str, pod_index: int, total_pods: int, config: dict) 
                                         }
                                     },
                                 },
+                                {
+                                    "name": "SEED_DEFER_INDEXES",
+                                    "value": "true",
+                                },
+                                {
+                                    "name": "SEED_WORKERS",
+                                    "value": str(config.get("workers", 1)),
+                                },
+                                {
+                                    "name": "PYTHONUNBUFFERED",
+                                    "value": "1",
+                                },
+                                {
+                                    "name": "SEED_BATCH_SIZE",
+                                    "value": "50000",
+                                },
                             ],
                             "resources": {
                                 "requests": {
@@ -130,7 +149,13 @@ def generate_all_jobs(tier: str, num_pods: int, config: dict, output_dir: str):
     """Generate Kubernetes Job manifests for all pods."""
     
     os.makedirs(output_dir, exist_ok=True)
-    
+
+    keep = {f"seeding-{tier}-pod-{i}.yaml" for i in range(num_pods)}
+    for stale in glob.glob(os.path.join(output_dir, f"seeding-{tier}-pod-*.yaml")):
+        if os.path.basename(stale) not in keep:
+            os.remove(stale)
+            print(f"  Removed stale: {stale}")
+
     print(f"Generating {num_pods} Job manifests for tier '{tier}'")
     
     for pod_index in range(num_pods):
@@ -151,14 +176,16 @@ def generate_all_jobs(tier: str, num_pods: int, config: dict, output_dir: str):
     }
     
     kustomization_file = os.path.join(output_dir, f"kustomization-{tier}.yaml")
-    with open(kustomization_file, "w") as f:
-        yaml.dump(kustomization, f, default_flow_style=False)
-    
+    kustomization_default = os.path.join(output_dir, "kustomization.yaml")
+    for path in (kustomization_file, kustomization_default):
+        with open(path, "w") as f:
+            yaml.dump(kustomization, f, default_flow_style=False)
+
     print(f"Created kustomization: {kustomization_file}")
     print(f"\nTo deploy all jobs:")
-    print(f"  kubectl apply -k {output_dir}/kustomization-{tier}.yaml")
+    print(f"  kubectl apply -k {output_dir}")
     print(f"\nTo delete all jobs:")
-    print(f"  kubectl delete -k {output_dir}/kustomization-{tier}.yaml")
+    print(f"  kubectl delete jobs -l app=farmer-registry-seeding")
 
 
 def main():
@@ -217,6 +244,12 @@ def main():
         help="Key in the secret for database password"
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Generator/COPY processes inside each pod (use 4 with --pods 2)",
+    )
+    parser.add_argument(
         "--cpu-request",
         default=DEFAULT_CPU_REQUEST,
         help="CPU request per pod"
@@ -256,6 +289,7 @@ def main():
         "cpu_limit": args.cpu_limit,
         "memory_request": args.memory_request,
         "memory_limit": args.memory_limit,
+        "workers": args.workers,
     }
     
     # Generate jobs

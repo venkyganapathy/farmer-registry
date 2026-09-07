@@ -20,12 +20,16 @@ def merge_manifests(tier: str, total_pods: int, output_dir: str):
     
     # Find all manifest files for this tier
     manifest_files = []
-    for pod_index in range(total_pods):
-        manifest_file = os.path.join(output_dir, f"seed_manifest_pod{pod_index}.json")
-        if os.path.exists(manifest_file):
-            manifest_files.append(manifest_file)
-        else:
-            print(f"Warning: Manifest file not found: {manifest_file}")
+    for name in sorted(os.listdir(output_dir)):
+        if name.startswith("seed_manifest_pod") and name.endswith(".json"):
+            manifest_files.append(os.path.join(output_dir, name))
+    if not manifest_files:
+        for pod_index in range(total_pods):
+            manifest_file = os.path.join(output_dir, f"seed_manifest_pod{pod_index}.json")
+            if os.path.exists(manifest_file):
+                manifest_files.append(manifest_file)
+            else:
+                print(f"Warning: Manifest file not found: {manifest_file}")
     
     if not manifest_files:
         print(f"Error: No manifest files found for tier '{tier}' with {total_pods} pods")

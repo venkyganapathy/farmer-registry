@@ -74,13 +74,27 @@ TABLE_NAMES = {
     "membership_details": ("g2p_register_membership_details", "g2p_register_history_membership_details", "MembershipDetails"),
 }
 
-BATCH_SIZE = 75_000
+BATCH_SIZE = int(os.environ.get("SEED_BATCH_SIZE", "50000"))
 RANDOM_SEED = 42
 
 DB_DSN = os.environ.get(
     "SEED_DB_DSN", "postgresql://postgres:postgres@localhost:5432/g2p_registry"
 )
-DEFER_INDEXES = False
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Drop non-PK indexes (including GIN pg_trgm) for the COPY, rebuild after.
+# Required for 10M+; leave off only for a smoke correctness check.
+DEFER_INDEXES = _env_flag("SEED_DEFER_INDEXES", True)
+
+# In-process COPY workers per pod. 2 pods × 4 workers ≈ 8 writers without more Jobs.
+WORKERS = int(os.environ.get("SEED_WORKERS", "1"))
 
 OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
 SEED_MANIFEST_PATH = os.path.join(OUTPUT_DIR, "seed_manifest.json")

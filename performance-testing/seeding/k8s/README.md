@@ -1,5 +1,8 @@
 # Kubernetes-based Parallel Seeding
 
+**Canonical command list, 2-pod 10M flow, and indexing notes:**
+[`../README.md`](../README.md).
+
 This directory contains Kubernetes resources for running the farmer-registry seeding scripts in parallel across multiple pods to handle large data volumes efficiently.
 
 ## Architecture
@@ -44,48 +47,35 @@ IMAGE_NAME=my-registry/farmer-seeding IMAGE_TAG=v1.0.0 ./build_and_push.sh
 Generate job manifests for a specific tier:
 
 ```bash
-python generate_jobs.py --tier primary --pods 10
+python3 generate_jobs.py --tier primary --pods 2 --workers 4
 ```
 
 This creates:
-- Individual job files: `seeding-primary-pod-0.yaml` through `seeding-primary-pod-9.yaml`
-- Kustomization file: `kustomization-primary.yaml`
+- Individual job files: `seeding-primary-pod-0.yaml`, `seeding-primary-pod-1.yaml`
+- `kustomization.yaml` and `kustomization-primary.yaml`
+
+`kubectl apply -k` needs a **directory**, not a file. Do not pass `kustomization-primary.yaml`.
 
 ### 3. Deploy Jobs
 
-```bash
-kubectl apply -k k8s/jobs/
-```
-
-Or specify the full path:
+From this `k8s/` directory, into the farmer-registry namespace:
 
 ```bash
-kubectl apply -k /home/techno-571/Desktop/openg2p/farmer-registry/performance-testing/seeding/k8s/jobs/
+kubectl apply -k jobs -n perftest
 ```
 
 ### 4. Monitor Progress
 
 ```bash
-# Watch job status
-kubectl get jobs -l app=farmer-registry-seeding -w
-
-# Check pod logs
-kubectl logs -l app=farmer-registry-seeding --tail=100 -f
-
-# Check specific pod
-kubectl logs seeding-primary-pod-0-xxxxx
+kubectl get jobs -n perftest -l app=farmer-registry-seeding -w
+kubectl logs -n perftest -l app=farmer-registry-seeding --tail=50 -f --prefix
 ```
 
 ### 5. Cleanup
 
 ```bash
-kubectl delete -k k8s/jobs/
-```
-
-Or specify the full path:
-
-```bash
-kubectl delete -k /home/techno-571/Desktop/openg2p/farmer-registry/performance-testing/seeding/k8s/jobs/
+kubectl delete jobs -n perftest -l app=farmer-registry-seeding
+# or: kubectl delete -k jobs -n perftest
 ```
 
 ## Advanced Usage
@@ -95,15 +85,12 @@ kubectl delete -k /home/techno-571/Desktop/openg2p/farmer-registry/performance-t
 Generate jobs with custom resource allocation:
 
 ```bash
-python generate_jobs.py \
-  --tier stress \
-  --pods 20 \
-  --image my-registry/farmer-seeding:v1.0 \
-  --db-dsn "postgresql://user:pass@postgres-service:5432/g2p_registry" \
-  --cpu-request "1000m" \
-  --cpu-limit "4" \
-  --memory-request "2Gi" \
-  --memory-limit "8Gi"
+python3 generate_jobs.py \
+  --tier primary --pods 2 --workers 4 \
+  --image vin0dkhichar/farmer-registry-seeding:v3 \
+  --pg-host 172.29.2.191 \
+  --cpu-request 250m --cpu-limit 4 \
+  --memory-request 1Gi --memory-limit 8Gi
 ```
 
 ### Merging Manifests
@@ -111,7 +98,7 @@ python generate_jobs.py \
 After parallel seeding completes, merge the individual pod manifests:
 
 ```bash
-python merge_manifests.py --tier primary --pods 10
+python3 merge_manifests.py --tier primary --pods 2
 ```
 
 This creates a combined manifest file `seed_manifest_primary_combined.json`.
@@ -122,9 +109,10 @@ This creates a combined manifest file `seed_manifest_primary_combined.json`.
 
 - `--tier`: Data volume tier (smoke, primary, stretch, stress)
 - `--pods`: Number of pods (overrides tier default)
+- `--workers`: COPY processes inside each pod (use 4 with `--pods 2`)
 - `--output-dir`: Output directory for manifests (default: k8s/jobs)
-- `--image`: Docker image name (default: openg2p/farmer-registry-seeding:latest)
-- `--db-dsn`: Database connection string
+- `--image`: Docker image name
+- `--pg-host` / `--pg-database` / `--pg-user` / `--db-secret`: Postgres connection
 - `--cpu-request/--cpu-limit`: CPU allocation per pod
 - `--memory-request/--memory-limit`: Memory allocation per pod
 
@@ -187,36 +175,14 @@ For uneven distribution, the last pod gets any remainder farmers. This is intent
 
 ## Performance Considerations
 
+- **2 pods for 10M**: `--pods 2 --workers 4` with CPU limit 4 / memory 8Gi per pod.
+  That is 8 COPY writers without extra Jobs. Rebuild the image after pulling these changes.
 - **Network**: Run pods close to the database (same cluster/region)
-- **Resources**: Adjust CPU/memory based on data volume and cluster capacity
-- **Batch Size**: The default batch size (75,000) is optimized for COPY operations
-- **Indexes**: For large volumes, consider setting `DEFER_INDEXES=True` in config.py
+- **Batch size**: Default is 50,000 (`SEED_BATCH_SIZE`). Do not raise it with `--workers 4`.
+- **Indexes**: automatic. Last finishing pod rebuilds; no manual `CREATE INDEX` unless a pod dies mid-rebuild. See [`../README.md`](../README.md).
 
 ## Example Workflow
 
 Complete workflow for 10M farmer test:
 
-```bash
-# 1. Build image
-cd k8s
-./build_and_push.sh
-
-# 2. Generate jobs for 10M farmers with 10 pods
-python generate_jobs.py --tier primary --pods 10
-
-# 3. Deploy
-kubectl apply -k k8s/jobs/
-
-# 4. Monitor (wait for completion)
-kubectl get jobs -l app=farmer-registry-seeding -w
-
-# 5. Copy manifests from pods (if needed)
-kubectl cp seeding-primary-pod-0-xxxxx:/app/seed_manifest_pod0.json ./seed_manifest_pod0.json
-# ... repeat for all pods
-
-# 6. Merge manifests
-python merge_manifests.py --tier primary --pods 10
-
-# 7. Cleanup
-kubectl delete -k k8s/jobs/
-```
+See [`../README.md`](../README.md) for the full copy-paste command list (build, generate, apply `-k jobs`, logs, copy manifests, merge, verify SQL, cleanup).

@@ -24,7 +24,9 @@ spec:
         - --pod-index
         - '0'
         - --total-pods
-        - '10'
+        - '2'
+        - --workers
+        - '4'
         env:
         - name: PGHOST
           value: 172.29.2.191
@@ -39,14 +41,23 @@ spec:
             secretKeyRef:
               key: farmer-registry-db-user
               name: farmer-registry
+        - name: SEED_DEFER_INDEXES
+          value: 'true'
+        - name: SEED_WORKERS
+          value: '4'
+        - name: PYTHONUNBUFFERED
+          value: '1'
+        - name: SEED_BATCH_SIZE
+          value: '50000'
         image: vin0dkhichar/farmer-registry-seeding:v3
+        imagePullPolicy: Always
         name: seeding
         resources:
           limits:
-            cpu: '2'
-            memory: 4Gi
+            cpu: '4'
+            memory: 8Gi
           requests:
-            cpu: 500m
+            cpu: 250m
             memory: 1Gi
       restartPolicy: OnFailure
   ttlSecondsAfterFinished: 86400
