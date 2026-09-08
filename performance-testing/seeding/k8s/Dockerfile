@@ -22,6 +22,7 @@ COPY id_scheme.py .
 COPY run.py .
 COPY search_anchors.py .
 COPY seed_manifest.py .
+COPY rebuild_indexes.py .
 COPY generators/ ./generators/
 
 ENV PYTHONUNBUFFERED=1

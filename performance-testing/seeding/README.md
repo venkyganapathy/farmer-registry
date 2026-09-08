@@ -174,6 +174,29 @@ python3 ../merge_manifests.py --tier primary --pods 2
 
 Then verify counts (SQL below), warm a few `ILIKE` searches, then Locust.
 
+### Rebuild missing live indexes (Job)
+
+The 10M seed restored **history** btrees only. Live UNIQUE/btree/GIN (including
+`search_text`) must be created by this Job. Do not start Locust until it
+finishes farmer GIN + ANALYZE.
+
+```sh
+export NS=perftest
+cd performance-testing/seeding
+
+kubectl delete job -n "$NS" rebuild-indexes --ignore-not-found
+kubectl create configmap farmer-registry-rebuild-indexes \
+  --from-file=rebuild_indexes.py=rebuild_indexes.py \
+  -n "$NS" --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f k8s/jobs/rebuild-indexes.yaml -n "$NS"
+
+kubectl get jobs,pods -n "$NS" -l app=farmer-registry-rebuild-indexes
+kubectl logs -n "$NS" -l app=farmer-registry-rebuild-indexes --tail=50 -f
+```
+
+The Job client is cheap; Postgres does the work. `activeDeadlineSeconds` is 16h.
+Re-run is safe (`IF NOT EXISTS`).
+
 ### Cleanup
 
 ```sh
