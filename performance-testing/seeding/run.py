@@ -5,9 +5,11 @@ flow and design rationale. Usage:
     cd performance-testing/seeding
     python run.py --tier smoke
     python run.py --tier primary --dsn postgresql://...
+    python run.py --tier primary --pod-index 0 --total-pods 2 --workers 4
 """
 
 import argparse
+import multiprocessing as mp
 import os
 import random
 import sys
@@ -17,15 +19,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 import db
+from db import log
 from common import RANDOM_SEED
 from generators import (
     crop, farm_inputs, farmer, history, household, household_member,
     land, livestock, membership_details,
 )
+from id_scheme import init_pod_id_scheme
 from search_anchors import generate_anchors
 from seed_manifest import ManifestBuilder
-
-random.seed(RANDOM_SEED)
 
 CHILD_GENERATORS = {
     "land": land.generate,
@@ -80,35 +82,77 @@ class TableSink:
             self.history_writer.flush()
 
 
-def run(tier: str, dsn_override: str | None):
+def _fmt_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def _progress_line(shard_index: int, farmers_written: int, target_farmers: int, elapsed: float, sinks: dict) -> str:
+    rate = farmers_written / elapsed if elapsed else 0
+    remaining = max(0, target_farmers - farmers_written)
+    eta = remaining / rate if rate else 0
+    live = sum(s.live_count for s in sinks.values())
+    hist = sum(s.history_count for s in sinks.values())
+    pct = (100.0 * farmers_written / target_farmers) if target_farmers else 100
+    return (
+        f"[seed] shard={shard_index} farmers={farmers_written}/{target_farmers} "
+        f"({pct:.1f}%) {rate:.0f} farmers/s eta={_fmt_duration(eta)} "
+        f"elapsed={_fmt_duration(elapsed)} live_rows={live} history_rows={hist}"
+    )
+
+
+def _shard_farmer_target(total_target_farmers: int, shard_index: int, total_shards: int) -> int:
+    farmers_per_shard = total_target_farmers // total_shards
+    if shard_index == total_shards - 1:
+        return total_target_farmers - (shard_index * farmers_per_shard)
+    return farmers_per_shard
+
+
+def generate_shard(
+    tier: str,
+    dsn_override: str | None,
+    shard_index: int,
+    total_shards: int,
+    total_target_farmers: int,
+):
     if dsn_override:
         config.DB_DSN = dsn_override
 
-    target_farmers = config.DATA_VOLUME_TIERS[tier]
-    print(f"[seed] tier={tier} target_farmers={target_farmers}")
+    random.seed(RANDOM_SEED + shard_index)
+    target_farmers = _shard_farmer_target(total_target_farmers, shard_index, total_shards)
+    log(
+        f"[seed] shard start tier={tier} shard={shard_index}/{total_shards} "
+        f"target_farmers={target_farmers} of total={total_target_farmers}"
+    )
 
+    init_pod_id_scheme(shard_index, total_shards, total_target_farmers)
     anchors = generate_anchors()
-    manifest = ManifestBuilder(search_terms=anchors, data_volume=tier)
+    manifest = ManifestBuilder(
+        search_terms=anchors,
+        data_volume=tier,
+        pod_index=shard_index,
+        total_pods=total_shards,
+    )
 
     conn = db.connect()
+    db.configure_bulk_session(conn)
     metadata_cursor = conn.cursor()
-
     sinks = {key: TableSink(conn, key, metadata_cursor) for key in config.TABLE_NAMES}
     metadata_cursor.close()
     conn.commit()
 
-    captured_indexes = {}
-    if config.DEFER_INDEXES:
-        print("[seed] deferring non-PK indexes for target tables")
-        with conn.cursor() as cur:
-            for key, (live_table, _, _) in config.TABLE_NAMES.items():
-                captured_indexes[live_table] = db.capture_and_drop_indexes(cur, live_table)
-        conn.commit()
-
     start = time.time()
     farmers_written = 0
     last_reported = 0
-    report_every = 500_000
+    last_report_at = start
+    report_every_farmers = 25_000
+    report_every_seconds = 30
 
     while farmers_written < target_farmers:
         household_row = household.generate()
@@ -139,44 +183,126 @@ def run(tier: str, dsn_override: str | None):
                     row = CHILD_GENERATORS[table_key](farmer_row)
                     sinks[table_key].write_live(row)
 
-        if farmers_written - last_reported >= report_every:
+        now = time.time()
+        if (
+            farmers_written - last_reported >= report_every_farmers
+            or now - last_report_at >= report_every_seconds
+        ):
             last_reported = farmers_written
-            elapsed = time.time() - start
-            rate = farmers_written / elapsed if elapsed else 0
-            print(f"[seed] farmers={farmers_written}/{target_farmers} ({rate:.0f}/s)")
+            last_report_at = now
+            log(_progress_line(shard_index, farmers_written, target_farmers, now - start, sinks))
 
-    print("[seed] flushing remaining batches")
+    log(f"[seed] shard={shard_index} flushing remaining COPY buffers")
     for sink in sinks.values():
         sink.flush()
     conn.commit()
 
-    if config.DEFER_INDEXES:
-        print("[seed] rebuilding deferred indexes")
-        with conn.cursor() as cur:
-            for live_table, index_defs in captured_indexes.items():
-                db.recreate_indexes(cur, index_defs)
-        conn.commit()
-
-    print("[seed] ANALYZE")
-    with conn.cursor() as cur:
-        for live_table, history_table, _ in config.TABLE_NAMES.values():
-            db.analyze(cur, live_table)
-            db.analyze(cur, history_table)
-    conn.commit()
-
     manifest.write(config.SEED_MANIFEST_PATH)
-    print(f"[seed] manifest written to {config.SEED_MANIFEST_PATH}")
-
     for key, sink in sinks.items():
-        print(f"[seed] {key}: live={sink.live_count} history={sink.history_count}")
-
+        log(f"[seed] shard={shard_index} {key}: live={sink.live_count} history={sink.history_count}")
     conn.close()
-    print(f"[seed] done in {time.time() - start:.0f}s")
+    log(
+        f"[seed] shard={shard_index} COPY done in {_fmt_duration(time.time() - start)} "
+        f"farmers={farmers_written}"
+    )
+
+
+def run(
+    tier: str,
+    dsn_override: str | None,
+    pod_index: int = 0,
+    total_pods: int = 1,
+    workers: int = 1,
+):
+    if dsn_override:
+        config.DB_DSN = dsn_override
+
+    total_target_farmers = config.DATA_VOLUME_TIERS[tier]
+    workers = max(1, workers)
+    total_shards = total_pods * workers
+    writer_id = f"pod{pod_index}"
+
+    log(
+        f"[seed] pod start tier={tier} total_target={total_target_farmers} "
+        f"pod={pod_index}/{total_pods} workers={workers} shards={total_shards} "
+        f"defer_indexes={config.DEFER_INDEXES} batch_size={config.BATCH_SIZE}"
+    )
+
+    parent_conn = db.connect()
+    db.configure_bulk_session(parent_conn)
+    if config.DEFER_INDEXES:
+        log("[seed] deferring non-PK indexes for live + history tables")
+        db.begin_deferred_indexes(parent_conn, writer_id)
+
+    start = time.time()
+    if workers == 1:
+        parent_conn.close()
+        generate_shard(tier, dsn_override, pod_index, total_pods, total_target_farmers)
+        parent_conn = db.connect()
+        db.configure_bulk_session(parent_conn)
+    else:
+        parent_conn.close()
+        ctx = mp.get_context("fork")
+        procs = []
+        for worker_id in range(workers):
+            shard_index = pod_index * workers + worker_id
+            log(f"[seed] starting worker={worker_id} shard={shard_index}/{total_shards}")
+            proc = ctx.Process(
+                target=generate_shard,
+                args=(tier, dsn_override, shard_index, total_shards, total_target_farmers),
+                name=f"seed-w{worker_id}",
+            )
+            proc.start()
+            log(f"[seed] worker={worker_id} pid={proc.pid} started")
+            procs.append(proc)
+        failed = False
+        for proc in procs:
+            proc.join()
+            if proc.exitcode != 0:
+                failed = True
+                log(f"[seed] worker {proc.name} pid={proc.pid} exited {proc.exitcode}")
+            else:
+                log(f"[seed] worker {proc.name} pid={proc.pid} finished ok")
+        if failed:
+            raise SystemExit(1)
+        parent_conn = db.connect()
+        db.configure_bulk_session(parent_conn)
+
+    rebuilt = False
+    if config.DEFER_INDEXES:
+        rebuilt = db.end_deferred_indexes(parent_conn, writer_id)
+
+    if rebuilt or not config.DEFER_INDEXES:
+        log("[seed] ANALYZE starting")
+        with parent_conn.cursor() as cur:
+            for live_table, history_table, _ in config.TABLE_NAMES.values():
+                db.analyze(cur, live_table)
+                db.analyze(cur, history_table)
+        parent_conn.commit()
+
+    parent_conn.close()
+    log(f"[seed] pod={pod_index} wall time {_fmt_duration(time.time() - start)}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tier", choices=list(config.DATA_VOLUME_TIERS), required=True)
     parser.add_argument("--dsn", default=None, help="overrides SEED_DB_DSN / config.DB_DSN")
+    parser.add_argument("--pod-index", type=int, default=0, help="zero-based index of this pod (0 to total-pods-1)")
+    parser.add_argument("--total-pods", type=int, default=1, help="total number of pods running in parallel")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=config.WORKERS,
+        help="COPY/generator processes inside this pod (default SEED_WORKERS or 1)",
+    )
     args = parser.parse_args()
-    run(args.tier, args.dsn)
+
+    if args.pod_index >= args.total_pods:
+        print(f"Error: pod-index ({args.pod_index}) must be less than total-pods ({args.total_pods})", flush=True)
+        sys.exit(1)
+    if args.workers < 1:
+        print("Error: --workers must be >= 1", flush=True)
+        sys.exit(1)
+
+    run(args.tier, args.dsn, args.pod_index, args.total_pods, args.workers)
