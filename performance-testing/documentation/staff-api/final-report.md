@@ -147,52 +147,279 @@ scenario's calls back-to-back, unlike a real case worker. Converting
 Locust throughput into a real-user-equivalent figure uses Little's Law:
 
 ```
-Real concurrent users = (scenario completions/sec) × (real completion time, seconds)
+Real concurrent users = (unit completions/sec) × (real completion time, seconds)
 ```
 
-Completions/sec is read from the one endpoint each scenario calls exactly
-once per completed `@task` iteration (verified against each locustfile),
-not the "Aggregated" row, which sums every endpoint call at its own
-per-iteration frequency and is not a completions/sec figure:
+**The unit is one fully-handled record, not one `@task` iteration.** An
+earlier version of this table anchored on whichever endpoint fires once
+per `@task` iteration (e.g. a session-summary widget, or a search-driven
+loop that drains an unpredictable number of pending items per iteration).
+That conflates "how many giant, variable-size batches finished" with "how
+fast is one record actually processed," and for `cr_read_and_approve` and
+`intake_read_and_approve` specifically it produced a false appearance of
+throughput dropping at Pod-Scale 3. The corrected unit, per scenario, is
+the realistic single-record journey a case worker actually performs —
+search, land on one record, fire every API that record's detail view
+needs, then (where applicable) act on it:
 
-| Scenario | Anchor endpoint |
-|---|---|
-| register_read | `get_subject_record` |
-| cr_create | `get_all_tabs` |
-| cr_read_and_approve | `get_register_change_request_summary_data` |
-| intake_create | `finalize_intake_form_submission` |
-| intake_read_and_approve | `get_intake_form_submissions_summary` |
+| Scenario | One unit of work | Anchor (fires once per unit) |
+|---|---|---|
+| register_read | search → zoom into 1 record → every tab, every pending CR on that tab, every version date on that tab | `get_subject_record` |
+| cr_create | search → pick 1 record → its tabs/sections → edit 1 section → create the CR | `create_change_request` + `create_change_request_for_core_data` |
+| cr_read_and_approve | search → pick 1 CR → its documents/schema/dedup/tasks → approve | `submit_task_decision` |
+| intake_create | render the form → save every section → fetch → finalize | `finalize_intake_form_submission` |
+| intake_read_and_approve | search → pick 1 submission → its documents/dedup/tasks → approve | `submit_task_decision` |
 
-Real completion times per scenario (assumed): register-read 30s, cr-create
-30s, cr-read-and-approve 30s, intake-create 60s, intake-read-and-approve
-30s.
+For each API in a unit's chain, its contribution to "total time for 1
+unit" is **its own average response time × how many times it actually
+fires per unit** (`endpoint's Request Count ÷ anchor's Request Count`,
+both from the same pod's CSV) — not counted once each, since several of
+these calls are structurally repeated per record (a record has several
+tabs; a tab has however many pending items it has) or repeated by the
+test's own search/candidate-discovery process. `T_real` (assumed real
+completion time — unchanged from before) is then multiplied by the
+anchor's own RPS, not a session/summary endpoint's.
 
-| Scenario | T_real | Pod-1 RPS → users | Pod-2 RPS → users | Pod-3 RPS → users |
-|---|---|---|---|---|
-| register_read | 30s | 1.007 → 30 | 1.494 → 45 | 2.088 → 63 |
-| cr_create | 30s | 1.324 → 40 | 2.145 → 64 | 2.423 → 73 |
-| cr_read_and_approve | 30s | 0.482 → 14 | 0.481 → 14 | 0.280 → 8 |
-| intake_create | 60s | 1.612 → 97 | 2.734 → 164 | 3.390 → 203 |
-| intake_read_and_approve | 30s | 2.148 → 64 | 3.114 → 93 | 1.793 → 54 |
+**register_read** — 1 register record fully read:
 
-`register_read`, `cr_create`, and `intake_create` scale with pod count, as
-expected. `cr_read_and_approve` and `intake_read_and_approve` don't:
-`cr_read_and_approve` is flat Pod-1→Pod-2 and drops at Pod-3 (14→14→8);
-`intake_read_and_approve` rises then drops at Pod-3 (64→93→54). Both are
-the AWE-touching, decision-submitting scenarios — this is the AWE/Keycloak
-bottleneck (§8) showing up as a real-user-capacity regression, not just a
-latency-percentile effect: scaling `staff-portal-api` pods buys more
-`register_read`/`cr_create`/`intake_create` capacity but actively hurts the
-two approval-workflow scenarios past Pod-Scale 2.
+| API | Pod-1 avg ms (×/unit) | Pod-2 avg ms (×/unit) | Pod-3 avg ms (×/unit) |
+|---|---|---|---|
+| `search_in_a_register` | 370ms (×1.00) | 374ms (×1.00) | 339ms (×1.00) |
+| `get_subject_record` | 244ms (×1.00) | 241ms (×1.00) | 208ms (×1.00) |
+| `get_all_tabs` | 263ms (×1.00) | 256ms (×1.00) | 214ms (×1.00) |
+| `get_tab_sections` | 270ms (×6.73) | 266ms (×6.81) | 224ms (×6.84) |
+| `get_tab_records` | 320ms (×6.72) | 312ms (×6.80) | 262ms (×6.83) |
+| `get_number_of_pending_change_requests` | 244ms (×6.70) | 240ms (×6.80) | 201ms (×6.82) |
+| `get_change_requests` | 268ms (×6.69) | 266ms (×6.79) | 222ms (×6.82) |
+| `get_change_request_documents` | 220ms (×1.87) | 237ms (×2.49) | 201ms (×1.96) |
+| `get_section_ui_schema` | 223ms (×1.86) | 235ms (×2.49) | 201ms (×1.96) |
+| `get_change_request` | 266ms (×1.86) | 288ms (×2.48) | 250ms (×1.95) |
+| `list_tasks_for_request` | 268ms (×1.86) | 307ms (×2.48) | 291ms (×1.95) |
+| `get_deduplication_change_request_results` | 224ms (×1.86) | 241ms (×2.48) | 207ms (×1.95) |
+| `get_deduplication_register_results` | 234ms (×1.86) | 234ms (×2.48) | 205ms (×1.95) |
+| `get_number_of_versions` | 262ms (×6.68) | 259ms (×6.77) | 214ms (×6.80) |
+| `get_version_dates` | 258ms (×6.68) | 250ms (×6.77) | 209ms (×6.80) |
+| `get_versions_for_a_date` | 263ms (×3.99) | 270ms (×4.22) | 220ms (×4.36) |
+| **Total time for 1 register record** | **15.45s** | **16.66s** | **13.45s** |
 
-These are `1-isolated` runs, each scenario measured with the pod running
-only that workload — each figure is that scenario's ceiling in isolation,
-not additive. A pod serving the real mixed workload contends for the same
-DB connections, CPU, and AWE/Keycloak capacity across all five scenarios
-at once, so the real mixed-workload concurrent-user number is lower than
-each isolated figure, particularly once
-`cr_read_and_approve`/`intake_read_and_approve` traffic starts contending
-with the others for AWE.
+| | Pod-1 | Pod-2 | Pod-3 |
+|---|---|---|---|
+| Anchor RPS (`get_subject_record`) | 1.007 | 1.494 | 2.088 |
+| T_real | 30s | 30s | 30s |
+| Real concurrent users | 30 | 45 | 63 |
+
+**cr_create** — 1 change request effected:
+
+| API | Pod-1 avg ms (×/unit) | Pod-2 avg ms (×/unit) | Pod-3 avg ms (×/unit) |
+|---|---|---|---|
+| `search_in_a_register` | 382ms (×0.36) | 336ms (×0.35) | 296ms (×0.36) |
+| `get_subject_record` | 291ms (×0.18) | 226ms (×0.18) | 178ms (×0.18) |
+| `get_all_sections` | 602ms (×0.18) | 516ms (×0.18) | 422ms (×0.18) |
+| `get_all_tabs` | 285ms (×0.18) | 246ms (×0.18) | 185ms (×0.18) |
+| `get_tab_sections` | 298ms (×1.25) | 248ms (×1.26) | 196ms (×1.28) |
+| `get_tab_records` | 354ms (×1.25) | 294ms (×1.25) | 232ms (×1.27) |
+| `get_attribute_values` | 273ms (×0.05) | 245ms (×0.05) | 195ms (×0.04) |
+| `create_change_request` | 564ms (93% of CRs) | 509ms (94% of CRs) | 518ms (94% of CRs) |
+| `create_change_request_for_core_data` | 584ms (7% of CRs) | 566ms (6% of CRs) | 543ms (6% of CRs) |
+| **Total time for 1 change request effected** | **1.75s** | **1.50s** | **1.32s** |
+
+Two different things are happening in this table, and they look similar
+but aren't. `search_in_a_register`/`get_subject_record`/`get_all_sections`/
+`get_all_tabs` carry ratios below 1.0 because one of these calls is
+genuinely **shared** across several CRs from the same search/record visit
+— `create_change_requests` fires them once per outer iteration, then
+creates one CR per tab that has a configured section (a few CRs per
+visit), so each call's cost is amortized, not skipped. `create_change_request`
+and `create_change_request_for_core_data` are different: every single CR
+creation calls **exactly one** of the two (core-section CRs route to the
+`_for_core_data` endpoint, non-core to the other — mutually exclusive,
+never both, never neither), which is why their two shares sum to exactly
+100% at every pod. There's no sharing or skipping here — the percentages
+say what fraction of CRs go through each variant, and the "total time for
+1 CR" row already reflects the correct probability-weighted blend of the
+two variants' costs (e.g. pod-1: 0.93×564ms + 0.07×584ms ≈ 565ms for
+"the call that actually creates the CR," whichever variant it turns out
+to be).
+
+| | Pod-1 | Pod-2 | Pod-3 |
+|---|---|---|---|
+| Anchor RPS (`create_change_request` + `create_change_request_for_core_data`) | 7.272 | 11.823 | 13.127 |
+| T_real | 30s | 30s | 30s |
+| Real concurrent users | 218 | 355 | 394 |
+
+**cr_read_and_approve** — 1 change request approved:
+
+| API | Pod-1 avg ms (×/unit) | Pod-2 avg ms (×/unit) | Pod-3 avg ms (×/unit) |
+|---|---|---|---|
+| `search_in_change_request` | 374ms (×2.17) | 415ms (×1.01) | 314ms (×1.17) |
+| `get_change_request_documents` | 306ms (×5.09) | 295ms (×3.07) | 166ms (×3.03) |
+| `get_section_ui_schema` | 306ms (×5.09) | 296ms (×3.07) | 164ms (×3.03) |
+| `get_change_request` | 374ms (×5.07) | 360ms (×3.06) | 205ms (×3.03) |
+| `get_deduplication_change_request_results` | 312ms (×5.06) | 302ms (×3.06) | 168ms (×3.03) |
+| `get_deduplication_register_results` | 312ms (×5.06) | 299ms (×3.06) | 167ms (×3.02) |
+| `list_tasks_for_request` | 364ms (×5.05) | 370ms (×3.05) | 294ms (×3.02) |
+| `submit_task_decision` | 480ms (×1.00) | 453ms (×1.00) | 377ms (×1.00) |
+| **Total time for 1 change request approved** | **11.30s** | **6.76s** | **4.27s** |
+
+The ×2-5 ratios on the detail/dedup/list_tasks calls reflect the
+locustfile's own design — one claimed search term is drained of every
+currently-pending CR before release, and most of those CRs get looked at
+(documents, dedup, `list_tasks_for_request`) without reaching an
+actionable task, so only a fraction end in `submit_task_decision`. That
+ratio (and hence the "total time for 1 CR") itself drops sharply from
+Pod-1 to Pod-3 in this run — worth treating as a property of this
+specific test's timing/data availability, not a stable per-CR constant.
+
+| | Pod-1 | Pod-2 | Pod-3 |
+|---|---|---|---|
+| Anchor RPS (`submit_task_decision`) | 1.437 | 3.939 | 4.367 |
+| T_real | 30s | 30s | 30s |
+| Real concurrent users | 43 | 118 | 131 |
+
+**intake_create** — 1 intake submission created:
+
+| API | Pod-1 avg ms (×/unit) | Pod-2 avg ms (×/unit) | Pod-3 avg ms (×/unit) |
+|---|---|---|---|
+| `render_intake_form` | 257ms (×1.03) | 205ms (×1.02) | 162ms (×1.02) |
+| `save_intake_form_submission` | 530ms (×9.17) | 407ms (×9.12) | 304ms (×9.13) |
+| `get_intake_form_submission` | 383ms (×1.01) | 298ms (×1.00) | 225ms (×1.00) |
+| `finalize_intake_form_submission` | 734ms (×1.00) | 613ms (×1.00) | 510ms (×1.00) |
+| **Total time for 1 intake submission created** | **6.24s** | **4.84s** | **3.67s** |
+
+`save_intake_form_submission` fires ~9.1 times per submission (one call
+per form section — a stable ratio across all three pods, unlike the
+read-and-approve scenarios above), so it dominates the total.
+
+| | Pod-1 | Pod-2 | Pod-3 |
+|---|---|---|---|
+| Anchor RPS (`finalize_intake_form_submission`) | 1.612 | 2.734 | 3.390 |
+| T_real | 60s | 60s | 60s |
+| Real concurrent users | 97 | 164 | 203 |
+
+**intake_read_and_approve** — 1 intake submission approved:
+
+| API | Pod-1 avg ms (×/unit) | Pod-2 avg ms (×/unit) | Pod-3 avg ms (×/unit) |
+|---|---|---|---|
+| `search_in_intake_form_submissions` | 547ms (×16.71) | 556ms (×8.84) | 332ms (×1.61) |
+| `get_intake_form_submission` | 160ms (×1.05) | 213ms (×1.08) | 233ms (×1.22) |
+| `get_intake_form_documents` | 107ms (×1.05) | 145ms (×1.08) | 161ms (×1.22) |
+| `get_deduplication_intake_form_register_results` | 114ms (×1.05) | 151ms (×1.08) | 162ms (×1.22) |
+| `get_deduplication_intake_form_intake_form_results` | 114ms (×1.05) | 147ms (×1.08) | 161ms (×1.22) |
+| `list_tasks_for_request` | 175ms (×1.05) | 226ms (×1.08) | 294ms (×1.22) |
+| `submit_task_decision` | 217ms (×1.00) | 280ms (×1.00) | 342ms (×1.00) |
+| **Total time for 1 intake submission approved** | **10.07s** | **6.14s** | **2.11s** |
+
+The search ratio here (×16.7 → ×8.8 → ×1.6) is the biggest swing in any of
+these five tables. ~20% of iterations deliberately search a miss-token
+(no pending results, no approval — see the locustfile's intentional-miss
+design) and the rest page through every unclaimed search term until one
+has pending work, so this number reflects how much of the seeded backlog
+was still findable per term at the time each pod's run happened, not a
+fixed per-submission search cost. Treat this scenario's "total time for 1
+submission" figure as the least stable of the five.
+
+| | Pod-1 | Pod-2 | Pod-3 |
+|---|---|---|---|
+| Anchor RPS (`submit_task_decision`) | 1.130 | 3.012 | 7.733 |
+| T_real | 30s | 30s | 30s |
+| Real concurrent users | 34 | 90 | 232 |
+
+**All five scenarios now scale up with Pod-Scale** under this corrected,
+per-record anchor — including `cr_read_and_approve` and
+`intake_read_and_approve`, which the session/summary-anchored version of
+this table had shown shrinking at Pod-Scale 3. That earlier drop was an
+artifact of the anchor, not a real capacity regression: once throughput is
+measured as "records/CRs/submissions actually completed per second"
+instead of "outer search-and-drain sessions completed per second," both
+scenarios scale cleanly.
+
+This does **not** contradict the separate peak-concurrency-ceiling finding
+from this conversation's cr_read_and_approve re-analysis (the ramp shape
+still freezes at a lower user count at Pod-Scale 3 than Pod-Scale 2, and
+AWE still logs connection-reset errors under load) — that is a tail/ceiling
+effect visible in the ramp shape's own ramp-to-breach behavior, not in
+this typical-case, whole-run throughput number. The two findings answer
+different questions: this table says "the typical CR/submission is handled
+faster and more of them get done per second as pods scale"; the
+peak-concurrency finding says "the *ceiling* before things start failing
+is still capped by AWE's fixed capacity." Both are true at once.
+
+These are still `1-isolated` runs, each scenario measured with the pod
+running only that workload — each figure is that scenario's ceiling in
+isolation, not additive. A pod serving the real mixed workload contends
+for the same DB connections, CPU, and AWE capacity across all five
+scenarios at once, so the real mixed-workload concurrent-user number is
+lower than each isolated figure.
+
+#### Step-by-step: theoretical capacity (server time only, before think-time)
+
+The tables above give "real concurrent users" from the *measured* RPS
+(Locust's own completions ÷ elapsed time, think-time and all). This is a
+second, independent derivation of the same quantity, built the other
+direction — starting from pure server-side cost and this run's actual
+concurrency, then substituting a realistic human pace for the test's own
+think-time:
+
+```
+records/sec (1 user, zero pauses)   = 1 ÷ (seconds per record, from the per-API tables above)
+total records/sec (server capacity) = N (peak concurrent users this run reached) × records/sec (1 user)
+realistic users                     = total records/sec × T_real
+```
+
+`N` is each scenario's peak `User Count` from its own `_stats_history.csv`
+— the highest concurrency the ramp shape reached before freezing at its
+SLO breach, i.e. the actual number of simulated users generating load
+when this pod's numbers above were recorded.
+
+| Scenario | Pod | Seconds/record | Records/sec (1 user) | N (peak users) | Total records/sec | T_real | Realistic users |
+|---|---|---|---|---|---|---|---|
+| register_read | Pod-1 | 15.45s | 0.0647 | 28 | 1.812 | 30s | **54** |
+| register_read | Pod-2 | 16.66s | 0.0600 | 48 | 2.880 | 30s | **86** |
+| register_read | Pod-3 | 13.45s | 0.0744 | 56 | 4.164 | 30s | **125** |
+| cr_create | Pod-1 | 1.75s | 0.5725 | 24 | 13.741 | 30s | **412** |
+| cr_create | Pod-2 | 1.50s | 0.6652 | 36 | 23.948 | 30s | **718** |
+| cr_create | Pod-3 | 1.32s | 0.7548 | 36 | 27.171 | 30s | **815** |
+| cr_read_and_approve | Pod-1 | 11.30s | 0.0885 | 28 | 2.478 | 30s | **74** |
+| cr_read_and_approve | Pod-2 | 6.76s | 0.1480 | 48 | 7.104 | 30s | **213** |
+| cr_read_and_approve | Pod-3 | 4.27s | 0.2342 | 32 | 7.495 | 30s | **225** |
+| intake_create | Pod-1 | 6.24s | 0.1602 | 20 | 3.204 | 60s | **192** |
+| intake_create | Pod-2 | 4.84s | 0.2068 | 28 | 5.790 | 60s | **347** |
+| intake_create | Pod-3 | 3.67s | 0.2722 | 28 | 7.623 | 60s | **457** |
+| intake_read_and_approve | Pod-1 | 10.07s | 0.0993 | 24 | 2.384 | 30s | **72** |
+| intake_read_and_approve | Pod-2 | 6.14s | 0.1627 | 40 | 6.509 | 30s | **195** |
+| intake_read_and_approve | Pod-3 | 2.11s | 0.4746 | 32 | 15.187 | 30s | **456** |
+
+**Why these numbers are higher than the measured-RPS table above them,
+scenario by scenario:**
+
+- `register_read`'s gap (54/86/125 here vs. 30/45/63 measured-RPS) is
+  fully explained: this method strips out the locustfile's own 1-3s
+  inter-tab sleep and 0.5-2s base `wait_time`, which together account for
+  essentially all of the difference (worked through in this
+  conversation — the two reconcile to within ~3-15% at every pod).
+- The other four scenarios have no per-tab sleep, only Locust's 0.5-2s
+  base `wait_time` between `@task` iterations — a small, arbitrary
+  pacing choice for the test, not a stand-in for real think-time. Their
+  gap (roughly 1.7-2x higher here than the measured-RPS table) is that
+  same effect at a smaller scale: this method replaces that ~0.5-2s
+  artificial pause with the realistic `T_real` (30s/60s) instead of
+  leaving it mixed into the measured rate.
+
+**These numbers are not a replacement for the measured-RPS table — they
+answer a different question and depend on an assumption the measured
+table doesn't need.** The measured-RPS table needs no assumption about
+`N`; it reads directly off what Locust actually observed. This table
+needs `N` (peak concurrent users) as an input, and its result is only as
+good as that number — `N` is a single peak sample from a 1-second-resolution
+history file, not a controlled, sustained concurrency level. Treat this
+table as a cross-check that confirms the same scaling pattern from a
+different angle (server-time-only capacity, independent of the test's own
+pacing), not as a more-precise replacement for the directly measured
+figures above. **Once the locustfiles are changed to remove artificial
+pauses and re-run, the measured-RPS table and this table should converge**
+— at that point, re-derive "real concurrent users" directly from the new
+measured RPS × `T_real`, the same way the measured-RPS table already
+does, rather than re-doing this N/T reconstruction.
 
 ### 5. Blended capacity, scaling, and data-volume sensitivity (Step 2)
 
