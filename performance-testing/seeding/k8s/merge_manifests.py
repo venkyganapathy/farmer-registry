@@ -51,9 +51,7 @@ def merge_manifests(tier: str, total_pods: int, output_dir: str):
             combined_record_ids.extend(manifest.get("record_ids", []))
             combined_household_ids.extend(manifest.get("household_ids", []))
             
-            # Use search terms from the first manifest
-            if not search_terms and manifest.get("search_terms"):
-                search_terms = manifest["search_terms"]
+            search_terms.extend(manifest.get("search_terms") or [])
             
             # Validate data volume matches
             if manifest.get("data_volume") != data_volume:
@@ -62,6 +60,7 @@ def merge_manifests(tier: str, total_pods: int, output_dir: str):
     # Remove duplicates (if any)
     combined_record_ids = list(set(combined_record_ids))
     combined_household_ids = list(set(combined_household_ids))
+    search_terms = sorted(set(search_terms))
     
     # Create combined manifest
     combined_manifest = {

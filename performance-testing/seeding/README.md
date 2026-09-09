@@ -197,6 +197,30 @@ kubectl logs -n "$NS" -l app=farmer-registry-rebuild-indexes --tail=50 -f
 The Job client is cheap; Postgres does the work. `activeDeadlineSeconds` is 16h.
 Re-run is safe (`IF NOT EXISTS`).
 
+### Reassign 10k search anchors on existing farmers (Job)
+
+Does **not** reseed. Updates `first_name` / `record_name` / `search_text` only
+(round-robin 10k 4-char terms, ~1k hits each on 10M rows). Drops farmer GIN
+for the UPDATE, then rebuilds it + `ANALYZE`. Re-run replaces the 4-char
+prefix if it is already one of the 10k terms.
+
+```sh
+export NS=perftest
+cd performance-testing/seeding
+
+kubectl delete job -n "$NS" reassign-search-anchors --ignore-not-found
+kubectl create configmap farmer-registry-reassign-search-anchors \
+  --from-file=reassign_search_anchors.py=reassign_search_anchors.py \
+  -n "$NS" --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f k8s/jobs/reassign-search-anchors.yaml -n "$NS"
+
+kubectl get jobs,pods -n "$NS" -l app=farmer-registry-reassign-search-anchors
+kubectl logs -n "$NS" -l app=farmer-registry-reassign-search-anchors --tail=50 -f
+```
+
+Do not start Locust until GIN rebuild + ANALYZE finish. Locust reads the
+same 10k terms from `seed_manifest.json` (`search_terms`).
+
 ### Cleanup
 
 ```sh

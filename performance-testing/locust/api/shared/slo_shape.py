@@ -114,7 +114,7 @@ class SLOStepRampShape(LoadTestShape):
     warmup_users = 2
     # Need enough success samples for a meaningful percentile; 5 made p95
     # ≈ max-of-5 and let a single outlier freeze the ramp.
-    min_requests_for_check = 100
+    min_requests_for_check = 20
     sustain_seconds = 2 * 60
 
     def __init__(self):

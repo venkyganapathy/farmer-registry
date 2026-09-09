@@ -3,13 +3,10 @@
 Each anchor is a random N-char lowercase string. Every seeded farmer's
 first_name gets exactly one anchor spliced in at a random position (not just
 prefixed), so a Locust user searching `%anchor%` exercises pg_trgm's
-substring matching rather than only prefix matching. See README.md
-"Search-text anchors" for the full rationale.
+substring matching rather than only prefix matching.
 
-Anchors are assigned to farmers round-robin (next_anchor), not by random
-choice -- with a small, fixed anchor pool this guarantees every anchor gets
-an (almost) exactly equal share of farmers instead of leaving it to random
-sampling variance.
+Anchors are assigned to farmers round-robin (next_anchor). 10_000 anchors
+on a 10M target gives ~1_000 farmers per term.
 """
 
 import random

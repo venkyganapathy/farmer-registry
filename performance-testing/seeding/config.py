@@ -38,12 +38,9 @@ HISTORY_TABLES = [
 
 # Search-text anchors: 4-char substrings embedded in Farmer first_name so
 # search_in_a_register / pg_trgm has guaranteed, high-cardinality matches.
-# Kept small and assigned round-robin (not randomly) so every anchor gets a
-# roughly equal, large share of farmers -- 10,000 anchors over e.g. a 10M
-# farmer target left ~1,000 farmers/anchor on average with random assignment
-# variance on top; 100 anchors round-robin gives every anchor exactly
-# target_farmers // 100 (+/-1) matches, deterministically.
-SEARCH_ANCHOR_COUNT = 100
+# Round-robin over 10_000 anchors on a 10M farmer target → ~1_000 hits/term
+# so GIN + LIMIT does not heap-scan tens of thousands of rows per search.
+SEARCH_ANCHOR_COUNT = 10_000
 SEARCH_ANCHOR_LENGTH = 4
 
 # Reduced field list for Farmer.search_text (see README: "Why search_text is

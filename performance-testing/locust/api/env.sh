@@ -16,20 +16,20 @@ export OIDC_CLIENT_SECRET=12yTrCklvC2obIdAV6DHPkva1P6r1LbP
 export OIDC_USERNAME=nina.patel
 export OIDC_PASSWORD=password
 export SEARCH_PAGE_SIZE=10
-export MAX_SEARCH_PAGE=2
+export MAX_SEARCH_PAGE=10
 export TAB_ITERATION_MIN_WAIT_SECONDS=0.0
 export TAB_ITERATION_MAX_WAIT_SECONDS=0.0
 
 # Volume-Tier -- see documentation/staff-api/test-scenarios.md §3. Uncomment exactly one.
-export VOLUME_TIER=smoke
-# export VOLUME_TIER=primary
+# export VOLUME_TIER=smoke
+export VOLUME_TIER=primary
 # export VOLUME_TIER=stretch
 # export VOLUME_TIER=stress
 
 # Pod-Scale -- app replica count under test. Uncomment exactly one.
-# export POD_SCALE=1
+export POD_SCALE=1
 # export POD_SCALE=2
-export POD_SCALE=3
+# export POD_SCALE=3
 
 # Step -- see documentation/staff-api/test-scenarios.md §3/§7. Uncomment exactly one.
 export STEP=1-isolated
@@ -39,11 +39,11 @@ export STEP=1-isolated
 
 # Only used when STEP=1-isolated (picks which of the 5 scenarios to fire).
 # Uncomment exactly one.
-# export ISOLATED_SCENARIO=register-read
+export ISOLATED_SCENARIO=register-read
 # export ISOLATED_SCENARIO=cr-create
 # export ISOLATED_SCENARIO=cr-read-and-approve
 # export ISOLATED_SCENARIO=intake-create
-export ISOLATED_SCENARIO=intake-read-and-approve
+# export ISOLATED_SCENARIO=intake-read-and-approve
 
 # =============================================================================
 # SLOs -- documentation/staff-api/test-scenarios.md §5. One section per
