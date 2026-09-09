@@ -23,6 +23,7 @@ COPY run.py .
 COPY search_anchors.py .
 COPY seed_manifest.py .
 COPY rebuild_indexes.py .
+COPY reassign_search_anchors.py .
 COPY generators/ ./generators/
 
 ENV PYTHONUNBUFFERED=1
